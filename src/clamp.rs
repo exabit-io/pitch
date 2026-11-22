@@ -1,36 +1,52 @@
-//! Pitch <-> utilization clamp mapping, and the sched_setattr/sched_getattr system calls (no libc crate: std already
-//! links libc, so `syscall` is declared directly).
+//! Pitch <-> utilization clamp mapping, and the system calls behind it (no libc crate: std already links libc, so
+//! `syscall` is declared directly): sched_setattr/sched_getattr for clamps and SCHED_IDLE, ioprio_set/get for the
+//! idle I/O class.
 //!
 //! Pitch N in -20..=20:  N > 0 raises the clamp floor   uclamp.min = N/20 * 1024 (uclamp.max = 1024)
 //!                       N < 0 lowers the clamp ceiling uclamp.max = (20+N)/20 * 1024 (uclamp.min = 0)
 //!                       N = 0 resets both to the kernel default (the task follows its cgroup and the system defaults)
 //! Under the schedutil governor a clamp floor makes the CPU the task runs on clock as if the task kept it that busy; a
-//! ceiling caps the frequency it may ask for. Children inherit the clamps across fork and exec.
+//! ceiling caps the frequency it may ask for. Children inherit clamps, scheduling policy and I/O priority.
 
 use std::io;
 
 pub const MAX_PITCH: i32 = 20;
 pub const SCALE: u32 = 1024; // SCHED_CAPACITY_SCALE
 
+const SCHED_IDLE: u32 = 5;
 const SCHED_FLAG_KEEP_POLICY: u64 = 0x08;
 const SCHED_FLAG_KEEP_PARAMS: u64 = 0x10;
 const SCHED_FLAG_UTIL_CLAMP_MIN: u64 = 0x20;
 const SCHED_FLAG_UTIL_CLAMP_MAX: u64 = 0x40;
 const RESET: u32 = u32::MAX; // (u32)-1: back to the default clamp
+const IOPRIO_WHO_PROCESS: i64 = 1; // with a thread id: that thread
+const IOPRIO_CLASS_SHIFT: u32 = 13;
+const IOPRIO_CLASS_IDLE: u32 = 3;
 
+// x86_64 has its own table; arm64, riscv64 and loongarch64 use the generic one (include/uapi/asm-generic/unistd.h).
 #[cfg(target_arch = "x86_64")]
-const SYS_SCHED_SETATTR: i64 = 314;
-#[cfg(target_arch = "x86_64")]
-const SYS_SCHED_GETATTR: i64 = 315;
-#[cfg(target_arch = "aarch64")]
-const SYS_SCHED_SETATTR: i64 = 274;
-#[cfg(target_arch = "aarch64")]
-const SYS_SCHED_GETATTR: i64 = 275;
-#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-compile_error!("pitch knows the sched_setattr system call numbers for x86_64 and aarch64 only");
+mod nr {
+    pub const SCHED_SETATTR: i64 = 314;
+    pub const SCHED_GETATTR: i64 = 315;
+    pub const IOPRIO_SET: i64 = 251;
+    pub const IOPRIO_GET: i64 = 252;
+}
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64", target_arch = "loongarch64"))]
+mod nr {
+    pub const SCHED_SETATTR: i64 = 274;
+    pub const SCHED_GETATTR: i64 = 275;
+    pub const IOPRIO_SET: i64 = 30;
+    pub const IOPRIO_GET: i64 = 31;
+}
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64", target_arch = "loongarch64")))]
+compile_error!("pitch knows the system call numbers for x86_64, aarch64, riscv64 and loongarch64 only");
 
 extern "C" {
     fn syscall(num: i64, ...) -> i64;
+}
+
+fn check(r: i64) -> io::Result<i64> {
+    if r < 0 { Err(io::Error::last_os_error()) } else { Ok(r) }
 }
 
 /// struct sched_attr, SCHED_ATTR_SIZE_VER1 (56 bytes): the first layout with utilization clamps.
@@ -81,34 +97,75 @@ pub fn parse_pitch(s: &str) -> Result<i32, String> {
     Ok(n)
 }
 
-/// Set the clamps of one task (thread id; 0 = the calling thread). Policy, priority and nice are kept.
-pub fn set(tid: i32, pitch: i32) -> io::Result<()> {
+/// Set the clamps of one task (thread id; 0 = the calling thread). With `idle`, also switch it to SCHED_IDLE (nice
+/// 19); otherwise policy, priority and nice are kept. Unprivileged callers may do both to their own tasks.
+pub fn set(tid: i32, pitch: i32, idle: bool) -> io::Result<()> {
     let (min, max) = clamps(pitch).unwrap_or((RESET, RESET));
+    let clamp_flags = SCHED_FLAG_UTIL_CLAMP_MIN | SCHED_FLAG_UTIL_CLAMP_MAX;
     let attr = SchedAttr {
         size: std::mem::size_of::<SchedAttr>() as u32,
-        sched_flags: SCHED_FLAG_KEEP_POLICY | SCHED_FLAG_KEEP_PARAMS | SCHED_FLAG_UTIL_CLAMP_MIN | SCHED_FLAG_UTIL_CLAMP_MAX,
+        sched_policy: if idle { SCHED_IDLE } else { 0 },
+        sched_flags: if idle { clamp_flags } else { SCHED_FLAG_KEEP_POLICY | SCHED_FLAG_KEEP_PARAMS | clamp_flags },
+        sched_nice: if idle { 19 } else { 0 },
         sched_util_min: min,
         sched_util_max: max,
         ..Default::default()
     };
     // SAFETY: the kernel reads `size` bytes of a valid, initialized repr(C) struct that outlives the call.
-    let r = unsafe { syscall(SYS_SCHED_SETATTR, tid as i64, &attr as *const SchedAttr, 0u64) };
-    if r < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    check(unsafe { syscall(nr::SCHED_SETATTR, tid as i64, &attr as *const SchedAttr, 0u64) }).map(|_| ())
 }
 
-/// The requested (uclamp.min, uclamp.max) of one task.
-pub fn get(tid: i32) -> io::Result<(u32, u32)> {
+/// Scheduling state of one task as the kernel reports it.
+pub struct TaskSched {
+    pub policy: u32,
+    pub min: u32,
+    pub max: u32,
+}
+
+/// The policy and requested (uclamp.min, uclamp.max) of one task.
+pub fn get(tid: i32) -> io::Result<TaskSched> {
     let mut attr = SchedAttr::default();
     let size = std::mem::size_of::<SchedAttr>() as u32;
     // SAFETY: the kernel writes at most `size` bytes into a valid repr(C) struct that outlives the call.
-    let r = unsafe { syscall(SYS_SCHED_GETATTR, tid as i64, &mut attr as *mut SchedAttr, size as u64, 0u64) };
-    if r < 0 {
-        return Err(io::Error::last_os_error());
-    }
+    check(unsafe { syscall(nr::SCHED_GETATTR, tid as i64, &mut attr as *mut SchedAttr, size as u64, 0u64) })?;
     if attr.size < size {
         return Err(io::Error::new(io::ErrorKind::Unsupported, "kernel reports no utilization clamps"));
     }
-    Ok((attr.sched_util_min, attr.sched_util_max))
+    Ok(TaskSched { policy: attr.sched_policy, min: attr.sched_util_min, max: attr.sched_util_max })
+}
+
+pub fn policy_name(p: u32) -> &'static str {
+    match p {
+        0 => "other",
+        1 => "fifo",
+        2 => "rr",
+        3 => "batch",
+        5 => "idle",
+        6 => "deadline",
+        _ => "unknown",
+    }
+}
+
+/// Put one thread (0 = the calling thread) in the idle I/O class: it gets disk time only when nobody else wants it
+/// (honoured by the BFQ and mq-deadline schedulers).
+pub fn set_io_idle(tid: i32) -> io::Result<()> {
+    // SAFETY: plain integer arguments.
+    check(unsafe { syscall(nr::IOPRIO_SET, IOPRIO_WHO_PROCESS, tid as i64, (IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT) as i64) })
+        .map(|_| ())
+}
+
+/// The I/O priority of one thread as "class" or "class/level" (none = follows the CPU nice value).
+pub fn io_prio(tid: i32) -> io::Result<String> {
+    // SAFETY: plain integer arguments.
+    let v = check(unsafe { syscall(nr::IOPRIO_GET, IOPRIO_WHO_PROCESS, tid as i64) })? as u32;
+    let (class, level) = (v >> IOPRIO_CLASS_SHIFT, v & ((1 << IOPRIO_CLASS_SHIFT) - 1));
+    Ok(match class {
+        0 => "none".into(),
+        1 => format!("realtime/{level}"),
+        2 => format!("best-effort/{level}"),
+        3 => "idle".into(),
+        _ => format!("class{class}"),
+    })
 }
 
 #[cfg(test)]
@@ -150,5 +207,10 @@ mod tests {
         for bad in ["21", "-21", "x", "", "1.5"] {
             assert!(parse_pitch(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn names() {
+        assert_eq!((policy_name(0), policy_name(5), policy_name(9)), ("other", "idle", "unknown"));
     }
 }

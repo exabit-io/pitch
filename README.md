@@ -8,7 +8,8 @@ pitch -n 20 -- echo "Maximum warp. Engage!"     # full speed
 pitch -n 20 -- perl -le'print Zsb1e6pzo^chr((grep{(1x$_)!~/^(11+)\1+$/}2..2e4)%32)x9'
 pitch -n -20 -- echo "One-quarter impulse."     # slowest
 pitch -- make -j8                               # +20, the default
-pitch -n -15 -- rsync -a mirror/ /srv/mirror/   # background, near the lowest frequency
+pitch -n -15 -- rsync -a mirror/ /srv/mirror/   # near the lowest frequency
+pitch -b -- xz -9 big.tar                       # background tier: idle CPU + idle I/O + -20
 pitch -n 20 -p 1234                             # every thread of a running process
 pitch -p 1234                                   # show it
 pitch                                           # this process's (inherited) pitch
@@ -51,8 +52,9 @@ schedutil), serial GNU hello package build, interleaved runs:
 ## Requirements
 
 - A kernel with `CONFIG_UCLAMP_TASK` (Ubuntu, Debian, Fedora kernels have it).
-- The **schedutil** governor. On Intel: `intel_pstate=passive cpufreq.default_governor=schedutil` on the kernel
-  command line. Other governors ignore clamps; `pitch` warns.
+- The **schedutil** governor. Intel (intel_pstate active): `intel_pstate=passive cpufreq.default_governor=schedutil`
+  on the kernel command line; AMD (amd-pstate-epp): `amd_pstate=passive` (or `guided`). Other governors ignore clamps;
+  `pitch` warns and prints the fix for the driver in use.
 - With schedutil, set `kernel.sched_util_clamp_min_rt_default=0`. Otherwise every runnable realtime task requests the
   top frequency; on the R940xa four 100 ms `SCHED_FIFO` heartbeats held the uncore at maximum, +72-76 W at idle.
 
@@ -67,7 +69,7 @@ cargo test                     # unit tests + end-to-end tests against the runni
 dpkg-buildpackage -us -uc -b   # Debian package
 ```
 
-x86_64 and aarch64.
+Built and tested on x86_64. aarch64, riscv64 and loongarch64 use the kernel's generic system call table (numbers in src/clamp.rs) but have not been built or tested yet.
 
 ## License
 

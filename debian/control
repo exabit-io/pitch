@@ -8,7 +8,7 @@ Rules-Requires-Root: no
 Homepage: https://github.com/exabit-io/pitch
 
 Package: pitch
-Architecture: amd64 arm64
+Architecture: amd64 arm64 riscv64 loong64
 Depends: ${misc:Depends}, ${shlibs:Depends}
 Description: run a command at a higher or lower CPU frequency (inverse of nice)
  nice changes how much CPU time a process gets; pitch changes how fast the CPU
@@ -16,7 +16,8 @@ Description: run a command at a higher or lower CPU frequency (inverse of nice)
  clamps, which the schedutil cpufreq governor follows: pitch +20 runs a task
  (and its children) at the top frequency wherever it is scheduled, so serial
  work such as package builds stops waiting for the governor to ramp up;
- negative pitches cap background work near the lowest frequency.
+ negative pitches cap background work near the lowest frequency. -b adds
+ idle CPU scheduling and idle I/O priority for a one-flag background tier.
  .
  Any user may set the pitch of their own processes. Needs a kernel with
  utilization clamping and the schedutil governor (on Intel:

@@ -54,6 +54,38 @@ fn pid_mode_sets_every_thread_and_shows_it() {
 }
 
 #[test]
+fn background_sets_idle_policy_and_io_class() {
+    if !uclamp_supported() {
+        return;
+    }
+    // run form: -b alone = -20 + SCHED_IDLE + idle I/O, inherited by the exec'd command
+    let mut child = Command::new(BIN).args(["-q", "-b", "--", "sleep", "30"]).stdout(Stdio::null()).spawn().unwrap();
+    let pid = child.id().to_string();
+    let mut out = String::new();
+    for _ in 0..50 {
+        out = pitch(&["-p", &pid]).1;
+        if out.contains("sleep") {
+            break; // exec done
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(out.contains("sleep pitch -20 (uclamp min=0 max=0") && out.contains("sched=idle io=idle"), "{out}");
+    child.kill().unwrap();
+    let _ = child.wait();
+
+    // pid form on a normal process: -b -n 20 = spare capacity at full speed
+    let mut child = Command::new("sleep").arg("30").stdout(Stdio::null()).spawn().unwrap();
+    let pid = child.id().to_string();
+    assert!(pitch(&["-p", &pid]).1.contains("sched=other io=none"));
+    let (rc, out, _) = pitch(&["-q", "-b", "-n", "20", "-p", &pid]);
+    assert!(rc == 0 && out.contains("pitch +20 background (1 threads)"), "{out}");
+    let out = pitch(&["-p", &pid]).1;
+    assert!(out.contains("pitch +20 (uclamp min=1024 max=1024") && out.contains("sched=idle io=idle"), "{out}");
+    child.kill().unwrap();
+    let _ = child.wait();
+}
+
+#[test]
 fn exit_codes_follow_nice() {
     assert_eq!(pitch(&["-q", "--", "/nonexistent/cmd"]).0, 127);
     assert_eq!(pitch(&["-q", "--", "/etc/hostname"]).0, 126);

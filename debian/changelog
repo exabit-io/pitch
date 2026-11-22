@@ -1,3 +1,12 @@
+pitch (1.1.0) unstable; urgency=medium
+
+  * -b/--background: SCHED_IDLE + idle I/O class + pitch -20 in one flag.
+  * Driver-specific hint (intel_pstate/amd-pstate passive) in the governor
+    warning; -p shows scheduling policy and I/O class.
+  * riscv64 and loong64 system call numbers.
+
+ -- Exabit Networks <packages@exabit.io>  Sun, 22 Nov 2026 09:30:00 +0000
+
 pitch (1.0.0) unstable; urgency=medium
 
   * First release: per-task CPU frequency boost/cap via utilization clamps,

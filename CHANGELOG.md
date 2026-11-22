@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.0 (2026-11-22)
+
+- `-b, --background`: the background tier in one flag. Adds SCHED_IDLE (CPU only when nothing else wants it) and the
+  idle I/O class to the pitch, which defaults to -20 (`-b -n 20`: spare capacity at full speed). Works with `-p` too.
+- `-p PID` also shows the scheduling policy and I/O class.
+- The governor warning names the fix for the cpufreq driver in use (intel_pstate active: `intel_pstate=passive`;
+  amd-pstate-epp: `amd_pstate=passive`; others: select schedutil) on its own `pitch: hint:` line.
+- riscv64 and loongarch64 system call numbers (the generic table, as arm64).
+
 ## 1.0.0 (2026-11-22)
 
 - First release. `pitch [-n N] -- CMD`, `pitch -n N -p PID...`, `pitch -p PID...`, `pitch`.
