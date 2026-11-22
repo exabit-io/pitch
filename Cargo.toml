@@ -1,0 +1,19 @@
+[package]
+name = "pitch"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+description = "Run a command at a higher or lower CPU frequency: the inverse of nice, via utilization clamping"
+repository = "https://github.com/exabit-io/pitch"
+
+[dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+
+[[bin]]
+name = "pitch"
+path = "src/main.rs"

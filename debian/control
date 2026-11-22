@@ -1,0 +1,23 @@
+Source: pitch
+Section: utils
+Priority: optional
+Maintainer: Exabit Networks <packages@exabit.io>
+Build-Depends: debhelper-compat (= 13), cargo (>= 0.66), rustc (>= 1.75)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://github.com/exabit-io/pitch
+
+Package: pitch
+Architecture: amd64 arm64
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: run a command at a higher or lower CPU frequency (inverse of nice)
+ nice changes how much CPU time a process gets; pitch changes how fast the CPU
+ runs while the process has it. It sets the scheduler's per-task utilization
+ clamps, which the schedutil cpufreq governor follows: pitch +20 runs a task
+ (and its children) at the top frequency wherever it is scheduled, so serial
+ work such as package builds stops waiting for the governor to ramp up;
+ negative pitches cap background work near the lowest frequency.
+ .
+ Any user may set the pitch of their own processes. Needs a kernel with
+ utilization clamping and the schedutil governor (on Intel:
+ intel_pstate=passive).

@@ -1,0 +1,6 @@
+pitch (1.0.0) unstable; urgency=medium
+
+  * First release: per-task CPU frequency boost/cap via utilization clamps,
+    the inverse of nice (-20..20, default +10, -p for running processes).
+
+ -- Exabit Networks <packages@exabit.io>  Sun, 22 Nov 2026 07:30:00 +0000

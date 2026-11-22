@@ -1,0 +1,163 @@
+.TH PITCH 1 "2026-11-22" "pitch 1.0.0" "User Commands"
+.SH NAME
+pitch \- run a command at a higher or lower CPU frequency (the inverse of nice)
+.SH SYNOPSIS
+.B pitch
+.RB [ \-q ]
+.RB [ \-n
+.IR N ]
+.RB [ \-\- ]
+.I COMMAND
+.RI [ ARG ]...
+.br
+.B pitch
+.RB [ \-q ]
+.B \-n
+.I N
+.B \-p
+.IR PID ...
+.br
+.B pitch \-p
+.IR PID ...
+.br
+.B pitch
+.SH DESCRIPTION
+.B nice
+changes how much CPU time a process gets.
+.B pitch
+changes how fast the CPU runs while the process has it.
+It sets the process's scheduler
+.IR "utilization clamps" ,
+which the
+.B schedutil
+cpufreq governor uses to choose a frequency for whichever CPU the task runs on.
+The clamp follows the task from core to core, so only that task (and its children) is affected.
+.PP
+.I N
+runs from \-20 to 20, with the sign the opposite way round from nice: higher is faster.
+.TP
+.B +1 .. +20
+raise the clamp floor,
+.BR uclamp.min " = " N /20 \(mu 1024.
+The CPU clocks as if the task kept it at least that busy, so short-lived and serial work (configure scripts,
+compiler invocations, package builds) runs at speed instead of starting at the lowest frequency each time.
++20 asks for the top frequency whenever the task runs; +10 for about 60 % of it with schedutil's 25 % headroom.
+.TP
+.B \-1 .. \-20
+lower the clamp ceiling,
+.BR uclamp.max " = (20 + " N ")/20 \(mu 1024."
+The task never asks for more than that share of the top frequency: background work such as mirror syncs or
+batch jobs runs slower and at better energy per operation. \-20 holds it at the lowest frequency.
+.TP
+.B 0
+restore the default (the task follows its cgroup and the system defaults).
+.PP
+Without
+.BR \-n ,
+a command runs at +10, as
+.B nice
+defaults to 10.
+Without a command,
+.B pitch
+prints its own pitch (like
+.B nice
+prints its niceness), which is the pitch it inherited.
+.PP
+Children inherit the pitch across
+.BR fork (2)
+and
+.BR execve (2).
+Unlike nice, the value is absolute, not an adjustment.
+.SH OPTIONS
+.TP
+.BR \-n ", " \-\-pitch " " \fIN\fR
+The pitch, \-20 to 20.
+.TP
+.BR \-p ", " \-\-pid
+Operate on the listed process IDs: with
+.BR \-n ,
+set the pitch of every thread of each process; without it, show each process's pitch and its requested and
+effective clamps.
+.TP
+.BR \-q ", " \-\-quiet
+No warnings.
+.TP
+.BR \-h ", " \-\-help
+Usage.
+.TP
+.BR \-V ", " \-\-version
+Version.
+.SH REQUIREMENTS
+A kernel with utilization clamping
+.RB ( CONFIG_UCLAMP_TASK ,
+present in Ubuntu and most distribution kernels) and the
+.B schedutil
+governor.
+Other governors ignore clamps;
+.B pitch
+then warns and changes nothing that matters.
+On Intel CPUs schedutil needs
+.B intel_pstate=passive
+on the kernel command line (the active driver offers only powersave and performance);
+.B cpufreq.default_governor=schedutil
+makes it the default.
+.PP
+With schedutil on Linux, set
+.B kernel.sched_util_clamp_min_rt_default=0
+(sysctl). Otherwise every runnable realtime task requests the top frequency, and on server CPUs
+whose uncore clock follows the highest request a single periodic realtime task can hold it at maximum:
+measured at +72 to +76 W at idle on a 4-socket Xeon.
+.SH PERMISSIONS
+Any user may set the pitch of their own processes, in both directions; root may set any process's.
+A cgroup's
+.B cpu.uclamp.min
+and
+.B cpu.uclamp.max
+bound what its tasks get, and
+.B kernel.sched_util_clamp_min
+and
+.B kernel.sched_util_clamp_max
+bound every task on the system.
+.B pitch
+warns when the system limit is below a requested boost.
+.SH EXIT STATUS
+The exit status of
+.I COMMAND
+when it runs.
+125 when
+.B pitch
+itself fails (usage),
+126 when
+.I COMMAND
+is found but cannot be run,
+127 when it is not found.
+If the pitch cannot be set,
+.B pitch
+reports it and runs
+.I COMMAND
+anyway, as nice does.
+With
+.BR \-p ,
+1 when any process could not be read or set.
+.SH EXAMPLES
+.TP
+.B pitch \-n 20 \-\- dpkg-buildpackage \-b
+A package build at full speed. Measured on a PowerEdge R940xa (schedutil): 18.0 s instead of 21.3 to 22.4 s, with
+12 % less package energy.
+.TP
+.B pitch \-n \-15 \-\- rsync \-a mirror/ /srv/mirror/
+A background sync that stays near the lowest frequency.
+.TP
+.B pitch \-n 20 \-p $(pgrep \-d" " qemu-system)
+Boost running virtual machines (every vCPU thread).
+.TP
+.B pitch \-p $$
+Show the shell's pitch.
+.SH SEE ALSO
+.BR nice (1),
+.BR renice (1),
+.BR uclampset (1),
+.BR sched_setattr (2),
+.BR sched (7)
+.SH AUTHOR
+Exabit Networks <packages@exabit.io>

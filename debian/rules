@@ -1,0 +1,34 @@
+#!/usr/bin/make -f
+PKGDIR := debian/pitch
+
+%:
+	dh $@
+
+.PHONY: check-version
+check-version:
+	@sv=$$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml); \
+	 cv=$$(dpkg-parsechangelog -SVersion | sed -E 's/^[0-9]+://; s/-[^-]*$$//'); \
+	 if [ "$$sv" != "$$cv" ]; then echo "Cargo.toml version $$sv differs from changelog $$cv" >&2; exit 1; fi
+
+override_dh_auto_build: check-version
+	cargo build --locked --offline --release --bin pitch
+
+# Unit tests plus end-to-end tests against the build machine's kernel (they adapt when it lacks uclamp).
+override_dh_auto_test:
+	cargo test --locked --offline
+
+override_dh_auto_clean:
+	rm -rf target
+
+override_dh_installchangelogs:
+	dh_installchangelogs CHANGELOG.md
+
+override_dh_installman:
+	dh_installman man/pitch.1
+
+override_dh_auto_install:
+	install -D -m 0755 target/release/pitch $(PKGDIR)/usr/bin/pitch
+
+# xz rather than zstd: debsigs signs xz members (and older dpkg reads them).
+override_dh_builddeb:
+	dh_builddeb -- -Zxz
