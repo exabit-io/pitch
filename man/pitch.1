@@ -163,6 +163,35 @@ A package build at full speed. Measured on a PowerEdge R940xa (schedutil): 18.0 
 .TP
 .B pitch \-n \-15 \-\- rsync \-a mirror/ /srv/mirror/
 A background sync that stays near the lowest frequency.
+.PP
+A background tier: pitch sets frequency, not CPU time, so for real QoS combine it with the tools that do the rest:
+.PP
+.nf
+.RS
+sudo systemd\-run \-\-scope \-p CPUWeight=1 \-p MemoryHigh=2G \e
+    chrt \-\-idle 0 ionice \-c3 pitch \-n \-20 \-\- job
+.RE
+.fi
+.IP
+.B CPUWeight=1
+and
+.B chrt \-\-idle
+mean the job only gets cores nothing else wants;
+.B MemoryHigh
+bounds its memory;
+.B ionice \-c3
+gives it idle I/O priority; \-20 keeps its cores near the lowest frequency, leaving the package power budget to the
+foreground tasks' turbo (with +20 instead, it finishes sooner on spare capacity at the cost of that power).
+Without
+.BR sudo ,
+a
+.B \-\-user
+scope's weight only competes with the user's own processes. Add
+.B IOWeight=1
+only where the disk uses the BFQ scheduler or io.cost (it does nothing under mq\-deadline or none);
+.B nice
+is redundant after
+.BR "chrt \-\-idle" .
 .TP
 .B pitch \-n 20 \-p $(pgrep qemu\-system)
 Boost running virtual machines (every vCPU thread).
