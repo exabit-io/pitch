@@ -1,4 +1,4 @@
-.TH PITCH 1 "2026-11-22" "pitch 1.1.0" "User Commands"
+.TH PITCH 1 "2026-11-22" "pitch 1.2.0" "User Commands"
 .SH NAME
 pitch \- run a command at a higher or lower CPU frequency (the inverse of nice)
 .SH SYNOPSIS
@@ -112,6 +112,10 @@ Usage.
 .BR \-V ", " \-\-version
 Version.
 .SH REQUIREMENTS
+.B sudo schedutil\-setup install \-\-now
+sets up everything below and keeps it at every boot; see
+.BR schedutil\-setup (8).
+.PP
 A kernel with utilization clamping
 .RB ( CONFIG_UCLAMP_TASK ,
 present in Ubuntu and most distribution kernels) and the
@@ -261,6 +265,7 @@ Do not give long-running, mostly idle services a high pitch: every wake-up reque
 whose uncore clock follows the highest request that costs power at idle (+11 to +16 W for one 100 ms periodic task at
 +20 on the R940xa). Use it for jobs.
 .SH SEE ALSO
+.BR schedutil\-setup (8),
 .BR nice (1),
 .BR renice (1),
 .BR uclampset (1),

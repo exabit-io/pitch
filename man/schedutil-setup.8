@@ -1,0 +1,204 @@
+.TH SCHEDUTIL\-SETUP 8 "2026-11-22" "pitch 1.2.0" "System Administration"
+.SH NAME
+schedutil\-setup \- enable, verify and remove the schedutil CPU frequency policy that pitch needs
+.SH SYNOPSIS
+.B schedutil\-setup
+.BR status " | " check " | " verify
+.br
+.B schedutil\-setup install
+.RB [ \-\-now ]
+.RB [ \-\-force ]
+.RB [ \-\-dry\-run ]
+.br
+.B schedutil\-setup apply
+.br
+.B schedutil\-setup uninstall
+.RB [ \-\-now ]
+.RB [ \-\-dry\-run ]
+.SH DESCRIPTION
+.B schedutil\-setup
+puts a machine on the CPU frequency policy that
+.BR pitch (1)
+works with, and that on its own saves power on loaded machines:
+.IP \(bu 2
+the cpufreq driver in passive mode
+.RB ( intel_pstate=passive
+on Intel,
+.B amd_pstate=passive
+on AMD), so a governor decides the frequency;
+.IP \(bu
+the
+.B schedutil
+governor
+.RB ( cpufreq.default_governor=schedutil ),
+which follows the scheduler's own per-task utilization (and with it the clamps
+.B pitch
+sets);
+.IP \(bu
+.BR kernel.sched_util_clamp_min_rt_default=0 .
+Without it every runnable realtime task asks schedutil for the top frequency, and on server CPUs whose uncore clock
+follows the highest request one periodic realtime task holds the whole package up.
+.PP
+The first two go on the kernel command line, the third into
+.IR /etc/sysctl.d .
+Measured at equal completed work, this policy drew 70\(en97 W less than ondemand at 10\(en50 % load on a 4\-socket Xeon
+server, and 11\(en21 W less than intel_pstate active/powersave at 25\(en50 % on a Xeon W workstation; it was equal
+elsewhere.
+.SH COMMANDS
+.TP
+.B status
+Show the driver and its mode, the governors, the realtime clamp, whether the boot arguments are live, the files this
+command manages, and every conflict (see
+.BR CONFLICTS ).
+Read\-only; any user.
+.TP
+.B check
+Only the checks from
+.BR status .
+Exit status 0 if
+.B install
+may proceed.
+.TP
+.B install
+Write the boot arguments (a GRUB drop\-in and
+.BR update\-grub ,
+or
+.B grubby
+where that is the bootloader), the sysctl file, and the cpufrequtils pin when that package is installed. Record the
+running driver mode, governor and realtime clamp in
+.I /var/lib/schedutil\-setup/state
+for
+.BR "uninstall \-\-now" .
+Nothing is changed while a conflict is found or the system is unsupported.
+.TP
+.B verify
+Exit status 0 only if every setting is live: boot arguments on the running kernel's command line, driver in passive
+mode, every cpufreq policy on schedutil, realtime clamp 0, sysctl file present, cpufrequtils pinned. Run it after
+every reboot or kernel update; usable from monitoring.
+.TP
+.B apply
+Switch the running system to the policy without writing anything; a reboot returns to the configured state.
+.TP
+.B uninstall
+Remove the files this command wrote and restore any file it had backed up. With
+.BR \-\-now ,
+also switch the running system back to the recorded mode, governor and realtime clamp (driver defaults if the
+recorded state already was this policy).
+.SH OPTIONS
+.TP
+.B \-\-now
+With
+.BR install :
+also switch the running system (the cpufreq driver mode can change at run time, no reboot is needed to start).
+With
+.BR uninstall :
+also switch it back.
+.TP
+.B \-\-force
+Proceed despite conflicts, a kernel without utilization clamping, or the untested amd\-pstate driver.
+.TP
+.BR \-\-dry\-run ", " \-n
+Print every change instead of making it.
+.SH FILES
+.TP
+.I /etc/default/grub.d/96\-cpufreq\-schedutil.cfg
+the boot arguments (Debian and Ubuntu GRUB).
+.TP
+.I /etc/sysctl.d/60\-schedutil\-rt\-clamp.conf
+.BR "kernel.sched_util_clamp_min_rt_default = 0" .
+.TP
+.I /etc/default/cpufrequtils
+.B GOVERNOR="schedutil"
+when the cpufrequtils package is installed. Without this file its boot script selects ondemand, which in passive mode
+silently replaces schedutil at every boot. An existing file is edited in place (only its GOVERNOR line) and restored
+on uninstall.
+.TP
+.I /var/lib/schedutil\-setup/
+.I state
+(the pre\-install mode, governor and clamp),
+.I backup/
+(files restored by uninstall),
+.I adopted/
+(hand\-written files that already carried the same setting: kept for reference, never restored).
+.TP
+.I /usr/share/pitch/schedutil/
+stock copies of the three files (the GRUB drop\-in with the Intel arguments). They are inert;
+.B install
+writes the live files from them, and configuration\-management tools can copy them as they are (a hand\-copied file
+that already carries the setting is adopted).
+.PP
+Files this command writes start with a
+.B "# Managed by schedutil\-setup"
+line; it removes only files carrying it.
+.SH CONFLICTS
+.B check
+and
+.B install
+look for anything else that sets the governor or the driver mode, and
+.B install
+refuses while one is found: conflicting
+.BR intel_pstate= ,
+.B amd_pstate=
+or
+.B cpufreq.default_governor=
+values in
+.I /etc/default/grub
+or another drop\-in or on the running command line; enabled tuned, auto\-cpufreq or cpupower services; TLP with
+.BR CPU_SCALING_GOVERNOR_ON_AC / BAT ;
+udev rules, systemd units, sysfs.conf, tmpfiles, cron or rc.local entries that write
+.I scaling_governor
+or the driver status; intel\-powermode configured with another passive governor. It reports, but does not block on,
+power\-profiles\-daemon (in passive mode it cannot set EPP) and thermald (compatible).
+.SH REQUIREMENTS
+Linux 5.10 or later with
+.B CONFIG_CPU_FREQ_GOV_SCHEDUTIL
+and
+.BR CONFIG_UCLAMP_TASK ,
+a cpufreq driver (most virtual machines have none: nothing to do), and Debian/Ubuntu GRUB
+.RB ( update\-grub )
+or
+.BR grubby .
+Tested on Ubuntu 24.04 with Intel Xeon (Cascade Lake SP and W) under intel_pstate; the grubby and amd\-pstate paths are
+untested.
+.SH EXIT STATUS
+.TP
+.B 0
+success
+.TP
+.B 1
+.B verify
+or
+.B check
+found a problem
+.TP
+.B 2
+usage error
+.TP
+.B 3
+unsupported system (nothing changed)
+.TP
+.B 4
+conflicts found (nothing changed; use
+.B \-\-force
+to override)
+.TP
+.B 5
+needs root
+.SH EXAMPLES
+.nf
+schedutil\-setup status
+sudo schedutil\-setup install \-\-dry\-run
+sudo schedutil\-setup install \-\-now      # live now, and at every boot
+sudo reboot
+sudo schedutil\-setup verify
+pitch \-n \-20 \-\- perl \-e '...'           # now the clamps take effect
+sudo schedutil\-setup uninstall \-\-now    # back out
+.fi
+.SH SEE ALSO
+.BR pitch (1),
+.BR sysctl (8),
+.BR update\-grub (8),
+.BR grubby (8),
+.BR cpufreq\-set (1)
+.SH AUTHOR
+Exabit Networks <packages@exabit.io>

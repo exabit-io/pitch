@@ -59,16 +59,16 @@ fn hint(policy: &Path) -> String {
     match driver.as_str() {
         "intel_pstate" => "intel_pstate is in active mode, which has no schedutil: boot with intel_pstate=passive \
                            cpufreq.default_governor=schedutil (or now: echo passive | sudo tee \
-                           /sys/devices/system/cpu/intel_pstate/status, then select schedutil)"
+                           /sys/devices/system/cpu/intel_pstate/status, then select schedutil); or: sudo schedutil-setup install --now"
             .into(),
         "amd-pstate-epp" => "amd-pstate is in active (EPP) mode, which has no schedutil: boot with amd_pstate=passive \
                              (or guided) cpufreq.default_governor=schedutil (or now: echo passive | sudo tee \
-                             /sys/devices/system/cpu/amd_pstate/status, then select schedutil)"
+                             /sys/devices/system/cpu/amd_pstate/status, then select schedutil); or: sudo schedutil-setup install --now"
             .into(),
         d if !available.split_whitespace().any(|g| g == "schedutil") => {
             format!("the {} driver offers no schedutil (available: {available})", if d.is_empty() { "cpufreq" } else { d })
         }
-        _ => format!("select it: {select}"),
+        _ => format!("select it: {select}; or: sudo schedutil-setup install --now"),
     }
 }
 
@@ -125,6 +125,7 @@ mod tests {
         let w = warnings(&d, 20);
         assert!(w.len() == 2 && w[0].starts_with("all 3 cpufreq policies") && w[0].contains("powersave on 3"), "{w:?}");
         assert!(w[1].starts_with("hint: intel_pstate is in active mode") && w[1].contains("boot with intel_pstate=passive cpufreq.default_governor=schedutil"), "{w:?}");
+        assert!(w[1].ends_with("or: sudo schedutil-setup install --now"), "{w:?}");
     }
 
     #[test]

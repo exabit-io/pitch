@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.0 (2026-11-22)
+
+- `schedutil-setup` (man 8 schedutil-setup), installed in /usr/sbin: puts a machine on the policy pitch needs and keeps
+  it there. `install [--now]` writes `intel_pstate=passive` / `amd_pstate=passive` + `cpufreq.default_governor=schedutil`
+  (GRUB drop-in or grubby), `kernel.sched_util_clamp_min_rt_default = 0` (sysctl.d) and a cpufrequtils pin (its init
+  script otherwise selects ondemand at every boot); refuses while tuned, TLP, auto-cpufreq, cpupower, other boot
+  arguments, udev rules etc. set the governor. `verify` after reboot, `status`, `apply` (runtime only), `uninstall [--now]`
+  (restores backups and the recorded driver mode). Measured savings at equal work: R940xa -70..-97 W at 10-50 % load
+  vs ondemand; Mac Pro 7,1 -11/-21 W at 25/50 % vs intel_pstate active.
+- The governor hint ends with `or: sudo schedutil-setup install --now`.
+
 ## 1.1.0 (2026-11-22)
 
 - `-b, --background`: the background tier in one flag. Adds SCHED_IDLE (CPU only when nothing else wants it) and the

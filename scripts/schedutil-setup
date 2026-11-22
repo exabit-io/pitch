@@ -1,0 +1,320 @@
+#!/bin/bash
+# schedutil-setup - enable the CPU frequency policy pitch(1) needs (shipped with pitch; Exabit, MIT OR Apache-2.0)
+#
+# Install, verify and remove the CPU frequency policy measured on a Dell R940xa and a Mac Pro 7,1:
+#   cpufreq driver in passive mode + the schedutil governor + kernel.sched_util_clamp_min_rt_default=0
+# Why: at equal completed work schedutil drew 70-97 W less than ondemand at 10-50 % load (R940xa) and 11-21 W less
+# than intel_pstate active/powersave at 25-50 % (Mac Pro), equal elsewhere. Without the RT clamp fix, any periodic
+# real-time task makes schedutil ask for maximum frequency and the idle draw rises (+72-76 W on the R940xa).
+#
+# Usage (run as root except status/check; man schedutil-setup):
+#   schedutil-setup status                       what is live, what is configured, what conflicts (read-only)
+#   schedutil-setup check                        preflight only; exit 0 if install may proceed
+#   schedutil-setup install [--now] [--force] [--dry-run]
+#                                                   write the boot args, sysctl and governor pins; --now also switches
+#                                                   the running system (no reboot needed to start saving)
+#   schedutil-setup verify                       after a reboot: exit 0 only if every setting is live
+#   schedutil-setup apply                        switch the running system only (nothing written; lost at reboot)
+#   schedutil-setup uninstall [--now] [--dry-run]
+#                                                   remove what install wrote, restore backups; --now also switches
+#                                                   the running system back to the mode recorded at install
+# --force: proceed despite conflicts or on an untested driver (amd-pstate). Exit codes: 0 ok, 1 verify/check failed,
+# 2 usage, 3 unsupported system, 4 conflicts (use --force), 5 not root.
+set -uo pipefail
+
+VERSION=1.2.0   # = the pitch package version (debian/rules check-version)
+SYS=/sys/devices/system/cpu
+STATE_DIR=/var/lib/schedutil-setup
+STATE=$STATE_DIR/state
+MARK="# Managed by schedutil-setup (do not edit; 'schedutil-setup uninstall' removes it)"
+MARK_PREFIX="# Managed by schedutil-setup"   # also matches files written by the pre-package schedutil-setup.sh
+GRUB_DROPIN=/etc/default/grub.d/96-cpufreq-schedutil.cfg
+GRUB_LEGACY=/etc/default/grub.d/96-intel-pstate-schedutil.cfg   # hand-written before this script existed
+update_grub(){ update-grub >/dev/null 2>&1; }
+SYSCTL_FILE=/etc/sysctl.d/60-schedutil-rt-clamp.conf
+CPUFREQUTILS_DEFAULT=/etc/default/cpufrequtils
+RT_SYSCTL=/proc/sys/kernel/sched_util_clamp_min_rt_default
+# Stock copies of the files install writes (package: /usr/share/pitch/schedutil; source tree: ../share/pitch/schedutil).
+STOCK=${SCHEDUTIL_SETUP_STOCK:-$(dirname "$(readlink -f "$0")")/../share/pitch/schedutil}
+STOCK_KARGS="intel_pstate=passive cpufreq.default_governor=schedutil"   # what the stock grub drop-in carries
+stock(){ [ -r "$STOCK/$1" ] || die 3 "stock file $STOCK/$1 missing (package damaged?)"; cat "$STOCK/$1"; }
+
+NOW=0 FORCE=0 DRY=0
+red(){ printf '\033[31m%s\033[0m' "$*"; }; grn(){ printf '\033[32m%s\033[0m' "$*"; }; ylw(){ printf '\033[33m%s\033[0m' "$*"; }
+[ -t 1 ] || { red(){ printf '%s' "$*"; }; grn(){ printf '%s' "$*"; }; ylw(){ printf '%s' "$*"; }; }
+say(){ printf '%s\n' "$*"; }
+die(){ local rc=$1; shift; printf 'schedutil-setup: %s\n' "$*" >&2; exit "$rc"; }
+run(){ if [ $DRY = 1 ]; then printf '  [dry-run] %s\n' "$*"; else "$@"; fi; }
+rd(){ cat "$1" 2>/dev/null; }
+
+# ---------------------------------------------------------------- detection
+policies(){ ls -d $SYS/cpufreq/policy[0-9]* 2>/dev/null; }
+driver(){ rd $SYS/cpufreq/policy0/scaling_driver || { [ -r $SYS/intel_pstate/status ] && echo intel_pstate; }; }
+# intel_pstate / amd-pstate report their mode; others have none
+pstate_dir(){ if [ -d $SYS/intel_pstate ]; then echo $SYS/intel_pstate; elif [ -d $SYS/amd_pstate ]; then echo $SYS/amd_pstate; fi; }
+pstate_mode(){ local d; d=$(pstate_dir); [ -n "$d" ] && rd "$d/status"; }
+# family: intel | amd | generic | none
+family(){
+  local d; d=$(driver)
+  case "$d" in
+    intel_pstate|intel_cpufreq) echo intel ;;
+    amd-pstate|amd-pstate-epp|amd_pstate) echo amd ;;
+    "") if [ -d $SYS/intel_pstate ]; then echo intel; elif [ -d $SYS/amd_pstate ]; then echo amd; else echo none; fi ;;
+    *) echo generic ;;
+  esac
+}
+kargs(){
+  case $(family) in
+    intel) echo "intel_pstate=passive cpufreq.default_governor=schedutil" ;;
+    amd) echo "amd_pstate=passive cpufreq.default_governor=schedutil" ;;
+    generic) echo "cpufreq.default_governor=schedutil" ;;
+  esac
+}
+governors_summary(){ local p; for p in $(policies); do rd "$p/scaling_governor"; done | sort | uniq -c | xargs; }
+all_schedutil(){ local p n=0; for p in $(policies); do n=$((n+1)); [ "$(rd "$p/scaling_governor")" = schedutil ] || return 1; done; [ $n -gt 0 ]; }
+# does this kernel have schedutil? (in active intel_pstate/amd EPP mode it is not listed, so ask the kernel config)
+has_schedutil(){
+  local c; c=/boot/config-$(uname -r)
+  grep -qw schedutil $SYS/cpufreq/policy0/scaling_available_governors 2>/dev/null && return 0
+  [ -r "$c" ] && grep -q '^CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y' "$c" && return 0
+  [ -r /proc/config.gz ] && zgrep -q '^CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y' /proc/config.gz && return 0
+  return 1
+}
+kver_ge(){ printf '%s\n%s\n' "$1" "$(uname -r | cut -d- -f1)" | sort -V -C; }   # running kernel >= $1
+bootloader(){
+  if command -v update-grub >/dev/null && [ -f /etc/default/grub ]; then echo grub-debian
+  elif command -v grubby >/dev/null; then echo grubby
+  else echo unknown; fi
+}
+cmdline_has(){ local a; for a in $1; do grep -qw -- "$a" /proc/cmdline || return 1; done; }
+
+# Other things that set the governor or the driver mode. Prints "LEVEL|what|how to fix", LEVEL = CONFLICT | WARN | INFO.
+conflicts(){
+  local f g
+  # boot args that fight ours, configured or live
+  for f in /proc/cmdline /etc/default/grub /etc/default/grub.d/*.cfg; do
+    [ -r "$f" ] || continue; [ "$f" = "$GRUB_DROPIN" ] || [ "$f" = "$GRUB_LEGACY" ] && continue
+    g=$(grep -v '^\s*#' "$f" | grep -oE 'intel_pstate=(active|disable|passive)|amd_pstate=(active|guided|disable|passive)|cpufreq\.default_governor=[a-z]+' | grep -vE '=passive$|=schedutil$' | sort -u | xargs)
+    [ -n "$g" ] && echo "CONFLICT|$f sets $g|remove it (ours is appended in $GRUB_DROPIN; a later or live value wins)"
+  done
+  # cpufrequtils: its init script defaults to GOVERNOR=ondemand when /etc/default/cpufrequtils is missing
+  if [ -x /etc/init.d/cpufrequtils ]; then
+    # shellcheck source=/dev/null
+    g=$(. $CPUFREQUTILS_DEFAULT 2>/dev/null; echo "${GOVERNOR:-ondemand (init default)}")
+    [ "$g" = schedutil ] && echo "INFO|cpufrequtils GOVERNOR=schedutil|ok" || echo "FIXED-BY-INSTALL|cpufrequtils would set $g at boot|install pins GOVERNOR=schedutil in $CPUFREQUTILS_DEFAULT"
+  fi
+  # services that own the governor or the energy policy
+  for g in tuned auto-cpufreq tlp cpupower; do
+    systemctl is-enabled "$g" >/dev/null 2>&1 || systemctl is-active "$g" >/dev/null 2>&1 || continue
+    case $g in
+      tlp) if grep -hsE '^\s*CPU_SCALING_GOVERNOR_ON_(AC|BAT)=' /etc/tlp.conf /etc/tlp.d/*.conf | grep -vq schedutil; then
+             echo "CONFLICT|tlp sets CPU_SCALING_GOVERNOR_ON_AC/BAT|set both to schedutil or disable tlp"; fi ;;
+      cpupower) echo "CONFLICT|cpupower.service is enabled (sets a governor from /etc/default/cpupower or /etc/sysconfig/cpupower)|set its governor to schedutil or disable it" ;;
+      *) echo "CONFLICT|$g is enabled and manages the governor|disable it (systemctl disable --now $g)" ;;
+    esac
+  done
+  systemctl is-active power-profiles-daemon >/dev/null 2>&1 && echo "WARN|power-profiles-daemon is active|in passive mode it cannot set EPP; harmless, but its profiles no longer change the CPU"
+  systemctl is-active thermald >/dev/null 2>&1 && echo "INFO|thermald is active|ok: it only acts near thermal limits"
+  # Exabit intel-powermode: must hand schedutil to the passive base, and auto mode floors loaded sockets
+  if [ -r /etc/intel-powermode.conf ]; then
+    g=$(sed -n 's/^PASSIVE_GOVERNOR=\([a-z]*\).*/\1/p' /etc/intel-powermode.conf); f=$(sed -n 's/^MODE=\([a-z]*\).*/\1/p' /etc/intel-powermode.conf)
+    [ "${g:-}" = schedutil ] || echo "CONFLICT|intel-powermode PASSIVE_GOVERNOR=${g:-unset}|set PASSIVE_GOVERNOR=schedutil in /etc/intel-powermode.conf"
+    [ "${f:-}" = economy ] || echo "WARN|intel-powermode MODE=${f:-unset}|economy recommended (auto floors loaded sockets and undoes schedutil's savings)"
+  fi
+  # anything else that writes the governor or the pstate mode
+  for f in $(grep -rlsE 'scaling_governor|intel_pstate/status|amd_pstate/status' /etc/sysfs.conf /etc/sysfs.d /etc/udev/rules.d \
+             /etc/systemd/system /etc/tmpfiles.d /etc/rc.local /etc/cron.d /etc/crontab 2>/dev/null); do
+    grep -vE '^\s*#' "$f" | grep -qE 'scaling_governor|intel_pstate/status|amd_pstate/status' || continue
+    case "$f" in /etc/systemd/system/intel-powermode*) continue ;; esac
+    echo "CONFLICT|$f writes the governor or the driver mode|review it"
+  done
+}
+
+# ---------------------------------------------------------------- state and files
+backup(){  # copy a file we are about to change or remove into the backup dir (restored by uninstall), once
+  local f=$1 b; [ -e "$f" ] || return 0
+  b=$STATE_DIR/backup$f; [ -e "$b" ] && return 0
+  run mkdir -p "$(dirname "$b")"; run cp -a "$f" "$b"; say "  backed up $f -> $b"
+}
+adopt(){  # a hand-written file that already carries this setting: keep a copy aside, never restore it
+  local f=$1 b; [ -e "$f" ] || return 0
+  b=$STATE_DIR/adopted$f
+  run mkdir -p "$(dirname "$b")"; run cp -a "$f" "$b"; say "  adopted hand-written $f (copy in $b)"
+}
+write_managed(){  # path, content (without marker), [regex: an unmanaged file matching it already has this setting]
+  local f=$1 body=$2 same=${3:-} new
+  new=$(printf '%s\n%s\n' "$MARK" "$body")
+  if [ -f "$f" ] && [ "$(cat "$f")" = "$new" ]; then say "  $f: already current"; return 0; fi
+  if [ -f "$f" ] && ! head -1 "$f" | grep -qF "$MARK_PREFIX"; then
+    if [ -n "$same" ] && grep -vE '^\s*(#|$)' "$f" | grep -qE "$same"; then adopt "$f"; else backup "$f"; fi
+  fi
+  if [ $DRY = 1 ]; then printf '  [dry-run] write %s:\n%s\n' "$f" "$(sed 's/^/      /' <<<"$new")"; else
+    mkdir -p "$(dirname "$f")"; printf '%s\n' "$new" > "$f"; say "  wrote $f"; fi
+}
+remove_managed(){
+  local f=$1
+  [ -f "$f" ] || return 0
+  if head -1 "$f" | grep -qF "$MARK_PREFIX"; then run rm -f "$f"; say "  removed $f"
+  else say "  kept $f (not written by this script)"; fi
+  if [ -e "$STATE_DIR/backup$f" ]; then run cp -a "$STATE_DIR/backup$f" "$f"; say "  restored $f from backup"; fi
+}
+record_state(){  # remember the running mode once, before the first install changes it
+  [ -f "$STATE" ] && return 0
+  run mkdir -p "$STATE_DIR"
+  local body
+  body=$(printf 'INSTALLED=%s\nFAMILY=%s\nORIG_MODE=%s\nORIG_GOVERNOR=%s\nORIG_RT=%s\n' "$(date -u +%FT%TZ)" "$(family)" \
+         "$(pstate_mode)" "$(rd $SYS/cpufreq/policy0/scaling_governor)" "$(rd $RT_SYSCTL)")
+  if [ $DRY = 1 ]; then printf '  [dry-run] record %s:\n%s\n' "$STATE" "$(sed 's/^/      /' <<<"$body")"; else printf '%s\n' "$body" > "$STATE"; fi
+}
+
+# ---------------------------------------------------------------- runtime switching
+wait_policies(){ local _; for _ in $(seq 50); do [ -n "$(policies)" ] && [ -r $SYS/cpufreq/policy0/scaling_governor ] && return 0; sleep 0.1; done; return 1; }
+set_mode(){  # passive | active | guided (pstate drivers only)
+  local d; d=$(pstate_dir); [ -n "$d" ] || return 0
+  [ "$(rd "$d/status")" = "$1" ] && return 0
+  run sh -c "echo $1 > $d/status" || return 1
+  [ $DRY = 1 ] || wait_policies   # the cpufreq policy directories vanish for a moment during the switch
+}
+set_governor(){ local p; for p in $(policies); do run sh -c "echo $1 > $p/scaling_governor" || return 1; done; }
+switch_on(){
+  say "switching the running system:"
+  case $(family) in intel|amd) set_mode passive || die 3 "could not switch $(pstate_dir)/status to passive" ;; esac
+  set_governor schedutil || die 3 "could not select schedutil"
+  if [ -w $RT_SYSCTL ] || [ $DRY = 1 ]; then run sysctl -q -w kernel.sched_util_clamp_min_rt_default=0; fi
+  [ $DRY = 1 ] || say "  now: mode=$(pstate_mode) governors: $(governors_summary) rt_default=$(rd $RT_SYSCTL)"
+}
+
+# ---------------------------------------------------------------- commands
+preflight(){  # prints findings; returns 0 ok, 3 unsupported, 4 conflicts
+  local fam rc=0 c lvl what fix
+  fam=$(family)
+  [ "$fam" = none ] && { say "$(red UNSUPPORTED) no cpufreq driver (VM or frequency scaling disabled): nothing to do"; return 3; }
+  has_schedutil || { say "$(red UNSUPPORTED) kernel $(uname -r) has no schedutil governor (CONFIG_CPU_FREQ_GOV_SCHEDUTIL)"; return 3; }
+  kver_ge 5.10 || { say "$(red UNSUPPORTED) kernel $(uname -r) < 5.10 (needs cpufreq.default_governor= and the uclamp RT sysctl)"; return 3; }
+  if [ ! -e $RT_SYSCTL ]; then
+    say "$(red UNSUPPORTED) $RT_SYSCTL missing (kernel without CONFIG_UCLAMP_TASK): every runnable RT task would pin maximum frequency"; [ $FORCE = 1 ] || return 3
+  fi
+  [ "$fam" = amd ] && { say "$(ylw UNTESTED) amd-pstate: passive mode is supported by the kernel but this policy was measured on Intel only"; [ $FORCE = 1 ] || rc=4; }
+  [ "$(bootloader)" = unknown ] && { say "$(red UNSUPPORTED) no update-grub (Debian GRUB) or grubby found: add '$(kargs)' to the kernel command line by hand"; return 3; }
+  while IFS='|' read -r lvl what fix; do
+    [ -n "$lvl" ] || continue
+    case $lvl in
+      CONFLICT) say "$(red CONFLICT) $what -> $fix"; [ $FORCE = 1 ] || rc=4 ;;
+      WARN) say "$(ylw WARN) $what -> $fix" ;;
+      FIXED-BY-INSTALL) say "$(ylw NOTE) $what -> $fix" ;;
+      *) say "INFO $what ($fix)" ;;
+    esac
+  done < <(conflicts)
+  return $rc
+}
+
+cmd_status(){
+  local fam; fam=$(family)
+  say "schedutil-setup $VERSION on $(hostname) ($(uname -r))"
+  say "  cpu:        $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
+  say "  driver:     $(driver) (family $fam, mode $(pstate_mode || echo n/a))"
+  say "  governors:  $(governors_summary)"
+  say "  rt clamp:   kernel.sched_util_clamp_min_rt_default=$(rd $RT_SYSCTL || echo 'n/a (no CONFIG_UCLAMP_TASK)')"
+  say "  boot args:  wanted '$(kargs)'; live: $(cmdline_has "$(kargs)" && grn yes || red no)"
+  say "  bootloader: $(bootloader)"
+  local f; for f in $GRUB_DROPIN $GRUB_LEGACY $SYSCTL_FILE $CPUFREQUTILS_DEFAULT; do
+    [ -f "$f" ] && say "  file:       $f$(head -1 "$f" | grep -qF "$MARK_PREFIX" && echo ' (managed)' || echo ' (hand-written)')"; done
+  [ -f "$STATE" ] && say "  installed:  $(sed -n 's/^INSTALLED=//p' $STATE) (was mode=$(sed -n 's/^ORIG_MODE=//p' $STATE) governor=$(sed -n 's/^ORIG_GOVERNOR=//p' $STATE) rt=$(sed -n 's/^ORIG_RT=//p' $STATE))"
+  say "checks:"; preflight; return 0
+}
+
+cmd_install(){
+  [ $DRY = 1 ] || [ "$(id -u)" = 0 ] || die 5 "install needs root"
+  local rc; preflight; rc=$?
+  [ $rc = 3 ] && die 3 "unsupported system, nothing changed"
+  [ $rc = 4 ] && die 4 "conflicts above, nothing changed (fix them or pass --force)"
+  local k f; k=$(kargs)
+  for f in 60-schedutil-rt-clamp.conf 96-cpufreq-schedutil.cfg cpufrequtils; do stock $f >/dev/null; done
+  say "installing ($(family): $k):"
+  record_state
+  write_managed $SYSCTL_FILE "$(stock 60-schedutil-rt-clamp.conf)" 'sched_util_clamp_min_rt_default *= *0\b'
+  case $(bootloader) in
+    grub-debian)
+      if [ -f $GRUB_LEGACY ]; then adopt $GRUB_LEGACY; run rm -f $GRUB_LEGACY; say "  replaced it by $GRUB_DROPIN"; fi
+      write_managed $GRUB_DROPIN "$(stock 96-cpufreq-schedutil.cfg | sed "s|$STOCK_KARGS|$k|")"
+      run update_grub || die 3 "update-grub failed"; say "  update-grub done" ;;
+    grubby)
+      run grubby --update-kernel=ALL --args="$k" || die 3 "grubby failed"; say "  grubby: added '$k' to every kernel entry" ;;
+  esac
+  if [ -x /etc/init.d/cpufrequtils ]; then
+    local cf_only_pin=0
+    [ -f $CPUFREQUTILS_DEFAULT ] && [ "$(grep -vE '^\s*(#|$)' $CPUFREQUTILS_DEFAULT | tr -d ' ')" = 'GOVERNOR="schedutil"' ] && cf_only_pin=1
+    if [ -f $CPUFREQUTILS_DEFAULT ] && ! head -1 $CPUFREQUTILS_DEFAULT | grep -qF "$MARK_PREFIX" && [ $cf_only_pin = 0 ]; then
+      backup $CPUFREQUTILS_DEFAULT   # someone's own settings: edit only GOVERNOR, restore the file on uninstall
+      if grep -q '^\s*GOVERNOR=' $CPUFREQUTILS_DEFAULT; then run sed -i 's/^\s*GOVERNOR=.*/GOVERNOR="schedutil"/' $CPUFREQUTILS_DEFAULT
+      else run sh -c "echo 'GOVERNOR=\"schedutil\"' >> $CPUFREQUTILS_DEFAULT"; fi
+      say "  $CPUFREQUTILS_DEFAULT: GOVERNOR=\"schedutil\" (edited, backup kept)"
+    else
+      write_managed $CPUFREQUTILS_DEFAULT "$(stock cpufrequtils)" 'GOVERNOR="?schedutil'
+    fi
+  fi
+  [ $NOW = 1 ] && switch_on
+  [ $DRY = 1 ] && { say "dry run: nothing was changed"; return 0; }
+  say "done. $( [ $NOW = 1 ] && echo 'Live now; the' || echo 'The') boot settings take effect at the next reboot; then run: schedutil-setup verify"
+}
+
+cmd_apply(){ [ $DRY = 1 ] || [ "$(id -u)" = 0 ] || die 5 "apply needs root"; local rc; preflight >/dev/null; rc=$?; [ $rc = 3 ] && die 3 "unsupported system"; switch_on; say "runtime only: a reboot returns to the configured state"; }
+
+cmd_verify(){
+  local fail=0 k; k=$(kargs)
+  chk(){ if eval "$2"; then say "  $(grn PASS) $1"; else say "  $(red FAIL) $1"; fail=1; fi; }
+  say "verify on $(hostname):"
+  chk "boot args live: $k" 'cmdline_has "$k"'
+  case $(family) in intel|amd) chk "driver mode passive (is $(pstate_mode))" '[ "$(pstate_mode)" = passive ]' ;; esac
+  chk "every policy runs schedutil ($(governors_summary))" 'all_schedutil'
+  chk "kernel.sched_util_clamp_min_rt_default = 0 (is $(rd $RT_SYSCTL))" '[ "$(rd $RT_SYSCTL)" = 0 ]'
+  chk "sysctl file present ($SYSCTL_FILE)" '[ -f $SYSCTL_FILE ]'
+  [ -x /etc/init.d/cpufrequtils ] && chk "cpufrequtils pinned to schedutil" '[ "$(. $CPUFREQUTILS_DEFAULT 2>/dev/null; echo "${GOVERNOR:-}")" = schedutil ]'
+  [ $fail = 0 ] && say "$(grn OK) all settings live" || say "$(red FAILED) see above"
+  return $fail
+}
+
+cmd_uninstall(){
+  [ $DRY = 1 ] || [ "$(id -u)" = 0 ] || die 5 "uninstall needs root"
+  local k; k=$(kargs)
+  say "uninstalling:"
+  remove_managed $SYSCTL_FILE
+  case $(bootloader) in
+    grub-debian) remove_managed $GRUB_DROPIN; remove_managed $GRUB_LEGACY
+                 run update_grub || die 3 "update-grub failed"; say "  update-grub done" ;;
+    grubby) run grubby --update-kernel=ALL --remove-args="$k"; say "  grubby: removed '$k'" ;;
+  esac
+  if [ -f $CPUFREQUTILS_DEFAULT ] && ! head -1 $CPUFREQUTILS_DEFAULT | grep -qF "$MARK_PREFIX" && [ -e "$STATE_DIR/backup$CPUFREQUTILS_DEFAULT" ]; then
+    run cp -a "$STATE_DIR/backup$CPUFREQUTILS_DEFAULT" $CPUFREQUTILS_DEFAULT; say "  restored $CPUFREQUTILS_DEFAULT from backup"
+  else remove_managed $CPUFREQUTILS_DEFAULT; fi
+  if [ $NOW = 1 ]; then
+    local m g r
+    m=$(sed -n 's/^ORIG_MODE=//p' $STATE 2>/dev/null); g=$(sed -n 's/^ORIG_GOVERNOR=//p' $STATE 2>/dev/null); r=$(sed -n 's/^ORIG_RT=//p' $STATE 2>/dev/null)
+    if [ "$m" = passive ] && [ "$g" = schedutil ] || [ -z "$m$g" ]; then   # recorded after a hand install: use driver defaults
+      case $(family) in intel|amd) m=active g=powersave ;; *) m="" g="" ;; esac; r=1024
+      say "  (no pre-install state recorded: using driver defaults${m:+ mode=$m governor=$g}, rt=1024)"
+    fi
+    say "switching the running system back:"
+    [ -n "$m" ] && { set_mode "$m" || say "  could not restore mode $m"; }
+    [ -n "$g" ] && { set_governor "$g" || say "  could not restore governor $g"; }
+    [ -e $RT_SYSCTL ] && run sysctl -q -w kernel.sched_util_clamp_min_rt_default="${r:-1024}"
+    [ $DRY = 1 ] || say "  now: mode=$(pstate_mode) governors: $(governors_summary) rt_default=$(rd $RT_SYSCTL)"
+  fi
+  [ $DRY = 1 ] && { say "dry run: nothing was changed"; return 0; }
+  rm -f "$STATE"
+  say "done. Backups stay in $STATE_DIR/backup. The boot settings revert at the next reboot."
+}
+
+cmd=${1:-}; shift || true
+for a in "$@"; do case $a in --now) NOW=1 ;; --force) FORCE=1 ;; --dry-run|-n) DRY=1 ;; *) die 2 "unknown option $a" ;; esac; done
+case $cmd in
+  status) cmd_status ;;
+  check) preflight; exit $? ;;
+  install) cmd_install ;;
+  apply) cmd_apply ;;
+  verify) cmd_verify; exit $? ;;
+  uninstall) cmd_uninstall ;;
+  -V|--version|version) say "schedutil-setup $VERSION" ;;
+  -h|--help|help|"") sed -n '2,/^set -uo/{/^set -uo/d;s/^# \{0,1\}//;p}' "$0" ;;
+  *) die 2 "unknown command '$cmd' (status|check|install|verify|apply|uninstall)" ;;
+esac

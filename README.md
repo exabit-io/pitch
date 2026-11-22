@@ -51,6 +51,19 @@ schedutil), serial GNU hello package build, interleaved runs:
 
 ## Requirements
 
+The package ships `schedutil-setup` (`man 8 schedutil-setup`), which sets up everything below and keeps it at every
+boot:
+
+```sh
+schedutil-setup status                 # what is live, what conflicts
+sudo schedutil-setup install --now     # passive driver + schedutil + RT clamp fix, live now and after reboots
+sudo schedutil-setup verify            # after a reboot
+```
+
+It refuses while something else sets the governor (tuned, TLP, auto-cpufreq, cpupower, other boot arguments, udev
+rules), pins cpufrequtils (whose boot script otherwise selects ondemand), and `uninstall --now` restores the previous
+driver mode. By hand:
+
 - A kernel with `CONFIG_UCLAMP_TASK` (Ubuntu, Debian, Fedora kernels have it).
 - The **schedutil** governor. Intel (intel_pstate active): `intel_pstate=passive cpufreq.default_governor=schedutil`
   on the kernel command line; AMD (amd-pstate-epp): `amd_pstate=passive` (or `guided`). Other governors ignore clamps;

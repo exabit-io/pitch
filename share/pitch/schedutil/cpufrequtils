@@ -1,0 +1,2 @@
+# without this file /etc/init.d/cpufrequtils sets GOVERNOR=ondemand at boot, replacing schedutil
+GOVERNOR="schedutil"
