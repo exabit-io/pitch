@@ -18,6 +18,20 @@ pitch                                           # this process's (inherited) pit
 so the CPU it runs on clocks as if it kept that CPU busy; `-N` lowers the ceiling (`uclamp.max = (20+N)/20 x 1024`);
 `0` restores the default. Children inherit it. The value is absolute, not an adjustment.
 
+## See it work
+
+A long CPU-bound job already runs at full speed under schedutil, so a negative pitch is the easy way to watch the clamp
+act. On a Xeon Platinum 8280L (3.9 GHz single-core turbo, 1.0 GHz minimum):
+
+```sh
+time pitch -n 0   -- perl -le'print Zsb1e6pzo^chr((grep{(1x$_)!~/^(11+)\1+$/}2..2e4)%32)x9'   # 17.1 s
+time pitch -n -10 -- perl -le'print Zsb1e6pzo^chr((grep{(1x$_)!~/^(11+)\1+$/}2..2e4)%32)x9'   # 32.4 s  (1.9x)
+time pitch -n -20 -- perl -le'print Zsb1e6pzo^chr((grep{(1x$_)!~/^(11+)\1+$/}2..2e4)%32)x9'   # 65.8 s  (3.8x: turbo / minimum)
+```
+
+`pitch -n 20` gives 17.0 s on the same job: nothing to gain once the governor has ramped up. The boost shows on short,
+bursty work, where every process would otherwise start on a cold core (see the build table below).
+
 ## Why
 
 Short-lived processes (configure tests, compiler invocations, package-build helpers) land on cold cores and finish
