@@ -4,7 +4,8 @@ Run a command at a higher or lower CPU frequency. The inverse of `nice`: `nice` 
 gets, `pitch` changes how fast the CPU runs while the process has it.
 
 ```sh
-pitch -n 20 -- echo "Make it so number one."   # full speed
+pitch -n 20 -- echo "Maximum warp. Engage!"     # full speed
+pitch -n -20 -- echo "One-quarter impulse."     # slowest
 pitch -- make -j8                               # +10, the default
 pitch -n -15 -- rsync -a mirror/ /srv/mirror/   # background, near the lowest frequency
 pitch -n 20 -p 1234                             # every thread of a running process
