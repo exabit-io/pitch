@@ -5,6 +5,7 @@ gets, `pitch` changes how fast the CPU runs while the process has it.
 
 ```sh
 pitch -n 20 -- echo "Maximum warp. Engage!"     # full speed
+pitch -n 20 -- perl -le'print Zsb1e6pzo^chr((grep{(1x$_)!~/^(11+)\1+$/}2..2e4)%32)x9'
 pitch -n -20 -- echo "One-quarter impulse."     # slowest
 pitch -- make -j8                               # +10, the default
 pitch -n -15 -- rsync -a mirror/ /srv/mirror/   # background, near the lowest frequency
