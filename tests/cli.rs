@@ -28,9 +28,9 @@ fn run_sets_and_children_inherit() {
     // through a shell and a grandchild
     let (rc, out, _) = pitch(&["-q", "-n", "12", "--", "sh", "-c", BIN]);
     assert_eq!((rc, out.trim()), (0, "12"));
-    // default is +10
+    // default is +20
     let (_, out, _) = pitch(&["-q", "--", BIN]);
-    assert_eq!(out.trim(), "10");
+    assert_eq!(out.trim(), "20");
 }
 
 #[test]

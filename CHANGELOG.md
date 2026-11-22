@@ -4,7 +4,8 @@
 
 - First release. `pitch [-n N] -- CMD`, `pitch -n N -p PID...`, `pitch -p PID...`, `pitch`.
 - N from -20 to 20 maps to the scheduler's utilization clamps (floor for +N, ceiling for -N, reset for 0); children
-  inherit it. Default +10.
+  inherit it. Default +20: on the R940xa +5 and +10 barely changed a serial build (0 to -2 %), +18 and +20 cut
+  it by 15 %.
 - Warns when a governor other than schedutil is in use or kernel.sched_util_clamp_min caps the boost; runs the command
   anyway when the pitch cannot be set (like nice). Exit codes 125/126/127 as nice and env.
 - Extracted from intel-powermode's `hold fast` (a socket-wide frequency floor) once per-task clamps measured the same

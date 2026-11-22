@@ -2,7 +2,7 @@
 //! process gets, pitch changes how fast the CPU runs while it has it, through the scheduler's utilization clamps.
 //!
 //!   pitch                          print this process's pitch
-//!   pitch [-n N] [--] CMD [ARG...] run CMD at pitch N (default +10)
+//!   pitch [-n N] [--] CMD [ARG...] run CMD at pitch N (default +20)
 //!   pitch -p PID...                print the pitch of running processes
 //!   pitch -n N -p PID...           set the pitch of running processes (every thread)
 
@@ -13,11 +13,11 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{exit, Command};
 
-const DEFAULT_PITCH: i32 = 10;
+const DEFAULT_PITCH: i32 = 20; // measured: the middle of the scale does little, the ends do (README)
 const EXIT_USAGE: i32 = 125; // like nice(1) and env(1): 125 = pitch itself failed, 126/127 = CMD could not be run
 
 const USAGE: &str = "\
-usage: pitch [-q] [-n N] [--] COMMAND [ARG]...   run COMMAND at pitch N (default +10)
+usage: pitch [-q] [-n N] [--] COMMAND [ARG]...   run COMMAND at pitch N (default +20)
        pitch [-q] -n N -p PID...                set the pitch of running processes (all their threads)
        pitch -p PID...                          show the pitch of running processes
        pitch                                    show this process's pitch
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn command_forms() {
-        assert_eq!(p("make -j8").unwrap().action, run(10, &["make", "-j8"]));
+        assert_eq!(p("make -j8").unwrap().action, run(20, &["make", "-j8"]));
         assert_eq!(p("-n 20 -- echo hi").unwrap().action, run(20, &["echo", "hi"]));
         assert_eq!(p("-n -5 nice -n 19 tar").unwrap().action, run(-5, &["nice", "-n", "19", "tar"])); // CMD's own options
         assert_eq!(p("-n+20 x").unwrap().action, run(20, &["x"]));

@@ -54,9 +54,10 @@ restore the default (the task follows its cgroup and the system defaults).
 .PP
 Without
 .BR \-n ,
-a command runs at +10, as
-.B nice
-defaults to 10.
+a command runs at +20.
+The scale is linear in clamp units, but its effect is not: a floor only matters above the frequency schedutil would
+pick anyway, and a ceiling only below it, so the ends of the range do most of the work (see
+.BR NOTES ).
 Without a command,
 .B pitch
 prints its own pitch (like
@@ -140,6 +141,21 @@ With
 .BR \-p ,
 1 when any process could not be read or set.
 .SH EXAMPLES
+.PP
+The quickest way to get a feel for it: one long CPU-bound job (it prints a short message) under different ceilings.
+Measured on a Xeon Platinum 8280L, 3.9 GHz single-core turbo, 1.0 GHz minimum:
+.PP
+.nf
+.RS
+time pitch \-n 0   \-\- perl \-le'print Zsb1e6pzo^chr((grep{(1x$_)!~/^(11+)\e1+$/}2..2e4)%32)x9'    # 17.1 s
+time pitch \-n \-10 \-\- perl \-le'print Zsb1e6pzo^chr((grep{(1x$_)!~/^(11+)\e1+$/}2..2e4)%32)x9'    # 32.4 s
+time pitch \-n \-20 \-\- perl \-le'print Zsb1e6pzo^chr((grep{(1x$_)!~/^(11+)\e1+$/}2..2e4)%32)x9'    # 65.8 s
+.RE
+.fi
+.PP
+\-20 takes 3.8 times as long: turbo over minimum frequency.
+.B pitch \-n 20
+gives 17.0 s, since a long-running job already gets full speed; a boost shows on short, bursty work.
 .TP
 .B pitch \-n 20 \-\- dpkg-buildpackage \-b
 A package build at full speed. Measured on a PowerEdge R940xa (schedutil): 18.0 s instead of 21.3 to 22.4 s, with
@@ -148,11 +164,33 @@ A package build at full speed. Measured on a PowerEdge R940xa (schedutil): 18.0 
 .B pitch \-n \-15 \-\- rsync \-a mirror/ /srv/mirror/
 A background sync that stays near the lowest frequency.
 .TP
-.B pitch \-n 20 \-p $(pgrep \-d" " qemu-system)
+.B pitch \-n 20 \-p $(pgrep qemu\-system)
 Boost running virtual machines (every vCPU thread).
 .TP
 .B pitch \-p $$
 Show the shell's pitch.
+.SH NOTES
+Measured on a PowerEdge R940xa (4\(mu Xeon Platinum 8280L, schedutil, Hyper-Threading on):
+.IP \(bu 2
+Serial package build: +5 and +10 changed little (0 to \-2 %), +15 \-7 %, +18 and +20 \-15 % time and \-11 % package
+energy. Parallel builds that already load every core: no change.
+.IP \(bu 2
+Background work at a fixed rate (25 % of the machine): \-20 drew 67 W less at the wall for the same work.
+.IP \(bu 2
+A pitch is not a share of CPU time. A capped job keeps its core busy longer, so where cores are scarce it holds them
+longer; combine it with
+.B nice
+(or
+.BR "chrt \-i" )
+to yield time as well:
+.BR "nice \-n 19 pitch \-n \-20 \-\- job" .
+.IP \(bu 2
+Both hardware threads of a core run at one frequency, the higher of their requests: a capped task on the sibling of a
+boosted one runs fast anyway.
+.IP \(bu 2
+Do not give long-running, mostly idle services a high pitch: every wake-up requests full speed, and on server CPUs
+whose uncore clock follows the highest request that costs power at idle (+11 to +16 W for one 100 ms periodic task at
++20 on the R940xa). Use it for jobs.
 .SH SEE ALSO
 .BR nice (1),
 .BR renice (1),
